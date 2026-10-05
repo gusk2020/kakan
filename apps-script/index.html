@@ -1,0 +1,73 @@
+<!doctype html>
+<html>
+<head>
+  <base target="_top">
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+  <style>
+    body{font-family:system-ui,sans-serif;margin:0;background:#f6f7f9;color:#111}
+    main{max-width:680px;margin:auto;padding:16px}
+    .card{background:white;border-radius:16px;padding:16px;box-shadow:0 1px 8px #0001}
+    h1{font-size:20px;margin:0 0 12px}
+    input,textarea,button{font:inherit}
+    input,textarea{width:100%;box-sizing:border-box;padding:12px;border:1px solid #ccc;border-radius:10px;margin:6px 0 12px}
+    .labels{display:flex;flex-wrap:wrap;gap:8px;margin:8px 0 16px}
+    .label{border:1px solid #bbb;border-radius:999px;padding:8px 12px;background:white}
+    .label.on{font-weight:700;border-width:2px}
+    button.primary{width:100%;border:0;border-radius:12px;padding:14px;font-weight:700}
+    #status{margin-top:12px;white-space:pre-wrap}
+  </style>
+</head>
+<body>
+<main>
+  <div class="card">
+    <h1>情報保存</h1>
+    <input id="title" placeholder="タイトル" value="<?= sharedTitle ?>">
+    <textarea id="text" rows="5" placeholder="共有テキスト"><?= sharedText ?></textarea>
+    <input id="url" placeholder="URL" value="<?= sharedUrl ?>">
+    <div id="labels" class="labels"></div>
+    <textarea id="note" rows="2" placeholder="メモ（任意）"></textarea>
+    <button class="primary" onclick="save()">保存</button>
+    <div id="status"></div>
+  </div>
+</main>
+<script>
+const selected = new Set();
+
+function init(){
+  google.script.run.withSuccessHandler(renderLabels).getLabels();
+}
+function renderLabels(labels){
+  const box=document.getElementById('labels');
+  box.innerHTML='';
+  labels.forEach(name=>{
+    const b=document.createElement('button');
+    b.type='button';
+    b.className='label';
+    b.textContent=name;
+    b.onclick=()=>{
+      if(selected.has(name)){selected.delete(name);b.classList.remove('on')}
+      else{selected.add(name);b.classList.add('on')}
+    };
+    box.appendChild(b);
+  });
+}
+function save(){
+  const st=document.getElementById('status');
+  st.textContent='保存中…';
+  google.script.run
+    .withSuccessHandler(r=>{
+      st.textContent='保存しました\n'+(r.resolution==='unresolved'?'元記事URLは未解決です。SmartNews URLは保持しました。':'URL確認: '+r.resolution);
+    })
+    .withFailureHandler(e=>{st.textContent='保存に失敗: '+e.message})
+    .saveItem({
+      title:document.getElementById('title').value,
+      text:document.getElementById('text').value,
+      url:document.getElementById('url').value,
+      note:document.getElementById('note').value,
+      labels:[...selected],
+    });
+}
+init();
+</script>
+</body>
+</html>
