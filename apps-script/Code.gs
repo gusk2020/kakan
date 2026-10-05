@@ -276,6 +276,12 @@ function tokenSet_(s) {
 }
 
 function hostname_(url) {
-  const m = String(url || '').match(/^https?:\/\/([^\/:?#]+)/i);
-  return m ? m[1].replace(/^www\./i, '').toLowerCase() : '';
+  try {
+    var parts = String(url || '').split('/');
+    var host = parts.length > 2 ? parts[2] : '';
+    if (host.indexOf('www.') === 0) host = host.substring(4);
+    return host.toLowerCase();
+  } catch (e) {
+    return '';
+  }
 }
