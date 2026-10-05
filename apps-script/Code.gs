@@ -44,11 +44,6 @@ function saveItem(payload) {
   const now = new Date();
   const source = detectSource_(incomingUrl, resolved.url);
 
-  // Items schema:
-  // A id, B saved_at, C source, D title, E url, F labels, G note,
-  // H original_share_text, I added_via, J processed_state,
-  // K source_created_at, L source_updated_at, M pinned, N archived, O trashed,
-  // P smartnews_url, Q publisher, R url_resolution, S resolved_at
   sh.appendRow([
     id,
     now,
@@ -78,6 +73,51 @@ function saveItem(payload) {
     url: resolved.url || incomingUrl,
     resolution: resolved.status,
   };
+}
+
+/**
+ * Resolve old SmartNews rows in small batches.
+ * Run manually from Apps Script while backfilling. It never guesses:
+ * only title-verified matches become confirmed.
+ */
+function resolveUnresolvedSmartNews(limit) {
+  limit = Math.max(1, Math.min(Number(limit) || 20, 50));
+
+  const ss = SpreadsheetApp.openById(CONFIG.SPREADSHEET_ID);
+  const sh = ss.getSheetByName(CONFIG.ITEMS_SHEET);
+  if (!sh) throw new Error('Items sheet not found');
+
+  const last = sh.getLastRow();
+  if (last < 2) return { checked: 0, confirmed: 0 };
+
+  const values = sh.getRange(2, 1, last - 1, 19).getDisplayValues();
+  let checked = 0;
+  let confirmed = 0;
+
+  for (let i = 0; i < values.length && checked < limit; i++) {
+    const row = values[i];
+    const source = row[2];
+    const title = row[3];
+    const currentUrl = row[4];
+    const smartnewsUrl = row[15] || currentUrl;
+    const status = row[17];
+
+    if (source !== 'SmartNews' || status !== 'unresolved' || !smartnewsUrl) continue;
+
+    checked++;
+    const resolved = resolveUrl_(smartnewsUrl, title);
+    if (resolved.status !== 'confirmed' || !resolved.url) continue;
+
+    const sheetRow = i + 2;
+    sh.getRange(sheetRow, 5).setValue(resolved.url);          // E url
+    sh.getRange(sheetRow, 16).setValue(smartnewsUrl);         // P smartnews_url
+    sh.getRange(sheetRow, 17).setValue(resolved.publisher);   // Q publisher
+    sh.getRange(sheetRow, 18).setValue('confirmed');          // R url_resolution
+    sh.getRange(sheetRow, 19).setValue(new Date());           // S resolved_at
+    confirmed++;
+  }
+
+  return { checked, confirmed };
 }
 
 function detectSource_(incomingUrl, finalUrl) {
@@ -110,8 +150,11 @@ function resolveUrl_(incomingUrl, sharedTitle) {
       headers: { 'User-Agent': 'Mozilla/5.0' },
     });
 
+    if (res.getResponseCode() >= 400) {
+      return { url: '', smartnewsUrl, publisher: '', status: 'unresolved' };
+    }
+
     const html = res.getContentText();
-    const finalSmartnewsUrl = res.getAllHeaders()['Location'] || incomingUrl;
     const candidates = extractExternalCandidates_(html);
 
     for (const candidate of candidates) {
@@ -119,7 +162,7 @@ function resolveUrl_(incomingUrl, sharedTitle) {
       if (check.confirmed) {
         return {
           url: candidate,
-          smartnewsUrl: finalSmartnewsUrl || smartnewsUrl,
+          smartnewsUrl,
           publisher: hostname_(candidate),
           status: 'confirmed',
         };
@@ -139,32 +182,36 @@ function resolveUrl_(incomingUrl, sharedTitle) {
 
 function extractExternalCandidates_(html) {
   const out = [];
-  const seen = new Set();
-  const regex = /https?:\\?\/\\?\/[^"'<>\\\s]+/g;
-  const matches = String(html || '').match(regex) || [];
+  const seen = {};
+  const body = String(html || '');
 
-  matches.forEach(raw => {
-    let u = raw
+  const rawMatches = body.match(/https?:\/\/[^"'<>\s]+/g) || [];
+  const escapedMatches = body.match(/https?:\\\/\\\/[^"'<>\s]+/g) || [];
+
+  rawMatches.concat(escapedMatches).forEach(raw => {
+    const u = raw
       .replace(/\\u0026/g, '&')
       .replace(/\\\//g, '/')
-      .replace(/&amp;/g, '&');
+      .replace(/&amp;/g, '&')
+      .replace(/[),\]}]+$/, '');
 
-    try {
-      const h = new URL(u).hostname;
-      if (!/smartnews\.com$/i.test(h) && !/google|gstatic|doubleclick/i.test(h)) {
-        if (!seen.has(u)) {
-          seen.add(u);
-          out.push(u);
-        }
-      }
-    } catch (_) {}
+    const h = hostname_(u);
+    if (!h) return;
+    if (/(^|\.)smartnews\.com$/i.test(h)) return;
+    if (/(^|\.)(google|gstatic|doubleclick)\./i.test(h)) return;
+
+    if (!seen[u]) {
+      seen[u] = true;
+      out.push(u);
+    }
   });
 
-  return out.slice(0, 20);
+  return out.slice(0, 30);
 }
 
 function verifyCandidate_(url, sharedTitle) {
   if (!sharedTitle) return { confirmed: false };
+
   try {
     const r = UrlFetchApp.fetch(url, {
       followRedirects: true,
@@ -176,6 +223,7 @@ function verifyCandidate_(url, sharedTitle) {
     const html = r.getContentText();
     const title =
       matchOne_(html, /<meta[^>]+property=["']og:title["'][^>]+content=["']([^"']+)["']/i) ||
+      matchOne_(html, /<meta[^>]+content=["']([^"']+)["'][^>]+property=["']og:title["']/i) ||
       matchOne_(html, /<title[^>]*>([\s\S]*?)<\/title>/i) ||
       '';
 
@@ -203,9 +251,10 @@ function titleSimilarity_(a, b) {
   const A = tokenSet_(a);
   const B = tokenSet_(b);
   if (!A.size || !B.size) return 0;
+
   let inter = 0;
   A.forEach(x => { if (B.has(x)) inter++; });
-  const union = new Set([...A, ...B]).size;
+  const union = Object.keys(Object.fromEntries([...A, ...B].map(x => [x, true]))).length;
   return union ? inter / union : 0;
 }
 
@@ -219,7 +268,6 @@ function tokenSet_(s) {
   const set = new Set();
   if (!n) return set;
 
-  // Japanese titles do not split cleanly by spaces, so use character bigrams.
   const compact = n.replace(/\s+/g, '');
   for (let i = 0; i < compact.length - 1; i++) {
     set.add(compact.slice(i, i + 2));
@@ -228,9 +276,6 @@ function tokenSet_(s) {
 }
 
 function hostname_(url) {
-  try {
-    return new URL(url).hostname.replace(/^www\./, '');
-  } catch (_) {
-    return '';
-  }
+  const m = String(url || '').match(/^https?:\/\/([^\/:?#]+)/i);
+  return m ? m[1].replace(/^www\./i, '').toLowerCase() : '';
 }
